@@ -1,6 +1,6 @@
 from telegram import Update, ParseMode
 from telegram.ext import CallbackContext, CommandHandler, MessageHandler, Filters, ConversationHandler, Updater
-from ChatGPT_HKBU import HKBU_ChatGPT
+from ChatGPT_HKBU_Copy import HKBU_ChatGPT
 from pymongo import MongoClient
 import datetime
 import logging
@@ -87,8 +87,7 @@ def user_search(update: Update, context: CallbackContext) -> int:
     
     global chatgpt
 
-    reply_message = chatgpt.submit(f'If \'{movie_name}\' is a movie. If not, say there are no related movie information. Otherwise, only output the answer for the following question: \n{update.message.text}')
-
+    reply_message = chatgpt.submit(f'If {movie_name} is a movie, answer the following question: \n\n {update.message.text}.\n\n Otherwise, say there are no related movie information.')
     logging.info("Update: " + str(update))
     logging.info("context: " + str(context))
     context.bot.send_message(chat_id=update.effective_chat.id, text=reply_message)
@@ -199,6 +198,20 @@ def end_conversation(update: Update, context: CallbackContext) -> int:
     update.message.reply_text('Goodbye 👋🏻', parse_mode=ParseMode.MARKDOWN_V2)
     return ConversationHandler.END  # Ends the conversation
 
+# Added by jack to avoid no response before /start >
+def echo(update, context):
+    reply_message = update.message.text.upper()
+    logging.info("Update: " + str(update))
+    logging.info("context: " + str(context))
+    context.bot.send_message(chat_id=update.effective_chat.id, text= reply_message)
+
+def equiped_chatgpt(update, context):
+    global chatgpt
+    reply_message = chatgpt.submit(update.message.text)
+    logging.info("Update: " + str(update))
+    logging.info("context: " + str(context))
+    context.bot.send_message(chat_id=update.effective_chat.id, text=reply_message)
+# < Added by jack to avoid no response before /start
 
 # Main function to set up the bot and handlers
 def main() -> None:
@@ -208,7 +221,10 @@ def main() -> None:
     
     global chatgpt
     chatgpt = HKBU_ChatGPT(config)
-
+# Added by jack to avoid no response before /start >    
+    # chatgpt_handler = MessageHandler(Filters.text & (~Filters.command), equiped_chatgpt)
+    # dispatcher.add_handler(chatgpt_handler)
+# <Added by jack to avoid no response before /start
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
     # Create a conversation handler
@@ -245,6 +261,12 @@ def main() -> None:
 
     # Start the Bot
     updater.start_polling()
+    # updater.start_webhook(
+    #     listen="0.0.0.0",
+    #     port=int(os.environ.get("PORT", 8443)),
+    #     url_path=config['TELEGRAM']['ACCESS_TOKEN'],
+    #     webhook_url=f"https://moviebot.herokuapp.com/{config['TELEGRAM']['ACCESS_TOKEN']}"
+    # )
     
     # Run the bot until you send a signal to stop
     updater.idle()

@@ -15,7 +15,7 @@ class HKBU_ChatGPT():
     # Initialize conversation history—
     global conversation_history
     global conversation_count
-    conversation_history= [{"role": "system", "content": "You are a Hong Kong movie advisor. Always provide insightful tips and recommendations related to Hong Kong films"}]
+    conversation_history= [{"role": "system", "content": "You are a movie advisor. Always provide insightful tips and recommendations"}]
     conversation_count =0
 
     def trim_text(self,text, max_length):
