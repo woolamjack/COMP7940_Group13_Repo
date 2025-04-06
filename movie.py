@@ -5,79 +5,131 @@ from pymongo import MongoClient
 import datetime
 import logging
 import os
-
+import re
 import configparser
-config = configparser.ConfigParser()
-config.read('config.ini')
-DB_url=config['MONGODB']['DB_URL']
 
+# Initialize config
+# config = configparser.ConfigParser()
+# config.read('../config.ini')
+DB_url=os.getenv('MONGODB_DB_URL')
 
-global client
+# MongoDB setup
 client = MongoClient(DB_url)
-global db 
 db = client['database']
 movie_list = db['movie'].distinct("name")
 
-
 # Define states for the conversation
-START, QACTION, ADD_COMMENT,SEARCH_MOVIE = range(4)
+START, SELECT_MOVIE, QACTION, ADD_COMMENT, SEARCH_MOVIE = range(5)  # Added SELECT_MOVIE
 
-# Start function
+def escape_markdown(text: str) -> str:
+    """Escape all reserved MarkdownV2 characters."""
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
+def search_movies(partial_name: str) -> list:
+    """Search for movies with partial name matching (case-insensitive)."""
+    regex = {'$regex': f'.*{partial_name}.*', '$options': 'i'}
+    movies = db['movie'].find({'name': regex}, {'name': 1, '_id': 0}).limit(10)
+    return [movie['name'] for movie in movies]
+
+def recommend_movies(update: Update, context: CallbackContext) -> int:
+    """Use ChatGPT to recommend 5 similar movies."""
+    movie_name = context.user_data.get('movie_name', None)
+
+    if not movie_name:
+        update.message.reply_text(
+            "❌ No movie selected. Please select a movie first or type a movie name.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return START
+
+    global chatgpt
+    # Ask ChatGPT to recommend similar movies
+    prompt = f"Based on the movie '{movie_name}', recommend 5 similar movies with a brief description for each."
+    reply_message = chatgpt.submit(prompt)
+
+    # Send the response back to the user
+    update.message.reply_text(
+        f"🎥 Recommendations based on *{escape_markdown(movie_name)}*:\n\n{reply_message}",
+        parse_mode=None
+    )
+
 def start(update: Update, context: CallbackContext) -> int:
-
     """Start the conversation."""
     update.message.reply_text(
         '👋👱🏼‍♀️ **Hello, nice to meet you\!**\nI am your 🎬🍿 *movie advisor* \n\nWhich *movie* you would like to know more about\?',
         parse_mode=ParseMode.MARKDOWN_V2
-)
+    )
     return START
 
-
-
-# Function to handle movie selection and details
 def user_selection(update: Update, context: CallbackContext) -> int:
-
-    # Clean and format the movie name
     movie_name = ' '.join(update.message.text.strip().split()).title()
-    context.user_data['movie_name'] = movie_name
-
+    
     if movie_name in movie_list:
+        context.user_data['movie_name'] = movie_name
+        return show_movie_details(update, context, movie_name)
+    
+    matched_movies = search_movies(movie_name)
+    if not matched_movies:
+        update.message.reply_text("❌ No matches found. Try again or /end.")
+        return START
+    
+    if len(matched_movies) == 1:
+        context.user_data['movie_name'] = matched_movies[0]
+        return show_movie_details(update, context, matched_movies[0])
+    
+    # Escape all movie names to avoid Markdown V2 parsing issues
+    escaped_movies = [escape_markdown(m) for m in matched_movies]
+    update.message.reply_text(
+        f"🔍 Found {len(matched_movies)} matches:\n\n" +
+        "\n".join([f"• {movie}" for movie in escaped_movies]) +
+        "\n\nReply with the *exact* name or /end.",
+        parse_mode=None
+    )
+    return SELECT_MOVIE
 
-        global db
-        document = db['movie'].find_one({'name':movie_name}, {"name": 1, "description": 1, "movie_date": 1, "duration": 1, "_id": 0})  
-        movie_details = document['description']
-        movie_date = document['movie_date']
-        duration = document['duration']
-
-        update.message.reply_text(
-            f'🎬 *Movie\: {movie_name}*\n',
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        update.message.reply_text(
-            f'📜 {str(movie_details)}\n'
-            f'📅 Release Date: {str(movie_date)}\n'
-            f'⏳ Duration: {duration}'
-        )
-
-        update.message.reply_text(f'🔍 Anything you want to ask about *{movie_name}*?', parse_mode=ParseMode.MARKDOWN_V2)
-        update.message.reply_text(
-        f'💬 More actions\:\n'
-        '/comment \- Share your thoughts or feedback\n'
-        '/query \- View comments from others\n'
-        '/end \- End the conversation at any time',
-        parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return QACTION
+def select_movie(update: Update, context: CallbackContext) -> int:
+    """Handle movie selection from wildcard search results."""
+    movie_name = ' '.join(update.message.text.strip().split()).title()
+    if movie_name in movie_list:
+        context.user_data['movie_name'] = movie_name
+        return show_movie_details(update, context, movie_name)
     else:
-        
-        update.message.reply_text(
-        f'💬 What would you like to know about *_{movie_name}_*\?\n\n'
-        '/end \- End the conversation at any time',
+        update.message.reply_text("❌ Invalid selection. Please choose from the list or /end.")
+        return SELECT_MOVIE
+
+
+def show_movie_details(update: Update, context: CallbackContext, movie_name: str) -> int:
+    """Display movie details with proper escaping."""
+    document = db['movie'].find_one({'name': movie_name})
+    if not document:
+        update.message.reply_text("❌ Movie not found in database.")
+        return START
+    
+    # Escape ALL dynamic text including movie name and description
+    escaped_name = escape_markdown(movie_name)
+    escaped_desc = escape_markdown(document["description"])
+    escaped_date = escape_markdown(str(document["movie_date"]))
+    escaped_duration = escape_markdown(str(document["duration"]))
+    
+    update.message.reply_text(
+        f'🎬 *Movie*: {escaped_name}\n'
+        f'📜 *Description*: {escaped_desc}\n'
+        f'📅 *Release Date*: {escaped_date}\n'
+        f'⏳ *Duration*: {escaped_duration}',
         parse_mode=ParseMode.MARKDOWN_V2
     )
-        return SEARCH_MOVIE
-
-
+    
+    # Return to the QACTION state for further actions
+    update.message.reply_text(
+        escape_markdown("💬 More actions (Chat directly with AI on this movie, or options below):\n"
+                        "/comment - Share your thoughts\n"
+                        "/query - View reviews\n"
+                        "/recommend - Get similar movie recommendations\n"
+                        "/end - Exit"),
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    return QACTION
 
 # Function to query movie comments
 def user_search(update: Update, context: CallbackContext) -> int:
@@ -96,9 +148,10 @@ def user_search(update: Update, context: CallbackContext) -> int:
 
         update.message.reply_text(f'🔍 Anything you want to ask about *{movie_name}*?', parse_mode=ParseMode.MARKDOWN_V2)
         update.message.reply_text(
-        f'💬 More actions\:\n'
+        f'💬 More actions  (Chat directly with AI on this movie, or options below)\:\n'
         '/comment \- Share your thoughts or feedback\n'
         '/query \- View comments from others\n'
+        '/recommend - Get similar movie recommendations\n'
         '/end \- End the conversation at any time',
         parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -130,9 +183,10 @@ def add_comment(update: Update, context: CallbackContext) -> int:
         
         update.message.reply_text(f'🔍 Anything you want to ask about *{movie_name}*?', parse_mode=ParseMode.MARKDOWN_V2)
         update.message.reply_text(
-        f'💬 More actions\:\n'
+        f'💬 More actions (Chat directly with AI on this movie, or options below)\:\n'
         '/comment \- Share your thoughts or feedback\n'
         '/query \- View comments from others\n'
+        '/recommend - Get similar movie recommendations\n'
         '/end \- End the conversation at any time',
         parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -160,9 +214,10 @@ def query_movie(update: Update, context: CallbackContext) -> int:
 
         update.message.reply_text(f'🔍 Anything you want to ask about *{movie_name}*?', parse_mode=ParseMode.MARKDOWN_V2)
         update.message.reply_text(
-        f'💬 More actions\:\n'
+        f'💬 More actions (Chat directly with AI on this movie, or options below)\:\n'
         '/comment \- Share your thoughts or feedback\n'
         '/query \- View comments from others\n'
+        '/recommend - Get similar movie recommendations\n'
         '/end \- End the conversation at any time',
         parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -215,60 +270,48 @@ def equiped_chatgpt(update, context):
 
 # Main function to set up the bot and handlers
 def main() -> None:
-    
-    updater = Updater(token=(config['TELEGRAM']['ACCESS_TOKEN']), use_context=True)
+    # updater = Updater(token=(config['TELEGRAM']['ACCESS_TOKEN']), use_context=True)
+    updater = Updater(token=(os.getenv('TELEGRAM_ACCESS_TOKEN')), use_context=True)
     dispatcher = updater.dispatcher
     
     global chatgpt
-    chatgpt = HKBU_ChatGPT(config)
-# Added by jack to avoid no response before /start >    
-    # chatgpt_handler = MessageHandler(Filters.text & (~Filters.command), equiped_chatgpt)
-    # dispatcher.add_handler(chatgpt_handler)
-# <Added by jack to avoid no response before /start
+    #chatgpt = HKBU_ChatGPT(config)
+    chatgpt = HKBU_ChatGPT()
+
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-    # Create a conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
             START: [
-            MessageHandler(Filters.text & ~Filters.command, user_selection),
-            CommandHandler('end', end_conversation)
+                MessageHandler(Filters.text & ~Filters.command, user_selection),
+                CommandHandler('end', end_conversation)
             ],
-            
+            SELECT_MOVIE: [  # Added this state
+                MessageHandler(Filters.text & ~Filters.command, select_movie),
+                CommandHandler('end', end_conversation)
+            ],
             QACTION: [
-            CommandHandler('comment', ask_comment),
-            CommandHandler('query', query_movie),
-            CommandHandler('end', end_conversation),
-            MessageHandler(Filters.text & ~Filters.command, user_search),
+                CommandHandler('comment', ask_comment),
+                CommandHandler('query', query_movie),
+                CommandHandler('recommend', recommend_movies),  # Add the /recommend command here
+                CommandHandler('end', end_conversation),
+                MessageHandler(Filters.text & ~Filters.command, user_search),
             ],
-
             ADD_COMMENT: [
-            MessageHandler(Filters.text & ~Filters.command, add_comment),
-            CommandHandler('end', end_conversation)
+                MessageHandler(Filters.text & ~Filters.command, add_comment),
+                CommandHandler('end', end_conversation)
             ],
-
             SEARCH_MOVIE: [
-            MessageHandler(Filters.text & ~Filters.command, user_search),
-            CommandHandler('end', end_conversation)
+                MessageHandler(Filters.text & ~Filters.command, user_search),
+                CommandHandler('end', end_conversation)
             ]
-        }
-        ,
-        fallbacks=[],
+        },
+        fallbacks=[]
     )
 
     dispatcher.add_handler(conv_handler)
-
-    # Start the Bot
     updater.start_polling()
-    # updater.start_webhook(
-    #     listen="0.0.0.0",
-    #     port=int(os.environ.get("PORT", 8443)),
-    #     url_path=config['TELEGRAM']['ACCESS_TOKEN'],
-    #     webhook_url=f"https://moviebot.herokuapp.com/{config['TELEGRAM']['ACCESS_TOKEN']}"
-    # )
-    
-    # Run the bot until you send a signal to stop
     updater.idle()
 
 if __name__ == '__main__':
